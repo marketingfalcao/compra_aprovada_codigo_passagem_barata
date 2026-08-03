@@ -6,7 +6,12 @@ const app = express();
 app.use(express.json());
 
 const MANYCHAT_API_URL = 'https://api.manychat.com';
-const TAG_NAME         = process.env.MANYCHAT_TAG_NAME || 'compra_aprovada_codigo_passagem_barata';
+const TAG_NAME          = process.env.MANYCHAT_TAG_NAME || 'compra_aprovada_codigo_passagem_barata';
+const TYPEFORM_TAG_NAME = process.env.TYPEFORM_TAG_NAME || 'preencheu-type-codigo-passagem-barata';
+
+// IDs dos campos personalizados (confirmados via getInfo)
+const PHONE_CUSTOM_FIELD_ID = 13701930; // "phone_number"
+const EMAIL_CUSTOM_FIELD_ID = 14836472; // "email"
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +84,8 @@ function extractExistingWhatsappId(apiError) {
 
 // ── ManyChat API ──────────────────────────────────────────────────────────────
 
+// findBySystemField SÓ aceita { phone: "..." } OU { email: "..." } diretos
+// (NÃO usa field_name/field_value — isso é exclusivo do findByCustomField)
 async function findSubscriberBySystemField(params, apiKey) {
   try {
     console.log(`🔍 Chamando findBySystemField:`, JSON.stringify(params));
@@ -101,33 +108,82 @@ async function findSubscriberBySystemField(params, apiKey) {
 
 async function findSubscriberByEmail(email, apiKey) {
   if (!email) return null;
-  return findSubscriberBySystemField({ field_name: 'email', field_value: email }, apiKey);
+  return findSubscriberBySystemField({ email }, apiKey);
 }
 
 async function findSubscriberByPhone(phone, apiKey) {
   const variants = normalizePhoneVariants(phone);
 
   for (const variant of variants) {
-    // Tenta pelo campo "phone"
-    let subscriber = await findSubscriberBySystemField(
-      { field_name: 'phone', field_value: variant }, apiKey
-    );
+    const subscriber = await findSubscriberBySystemField({ phone: variant }, apiKey);
     if (subscriber?.id) {
-      console.log(`✅ Subscriber encontrado por phone: ${subscriber.id}`);
-      return subscriber;
-    }
-
-    // Tenta pelo campo "whatsapp_phone" (muitos contatos só têm esse preenchido)
-    subscriber = await findSubscriberBySystemField(
-      { field_name: 'whatsapp_phone', field_value: variant }, apiKey
-    );
-    if (subscriber?.id) {
-      console.log(`✅ Subscriber encontrado por whatsapp_phone: ${subscriber.id}`);
+      console.log(`✅ Subscriber encontrado por phone (sistema): ${subscriber.id}`);
       return subscriber;
     }
   }
 
   return null;
+}
+
+// ── Busca por CAMPOS PERSONALIZADOS (custom fields) ──────────────────────────
+// Usa isso quando o telefone/email real está salvo em custom_fields
+// (como é o caso do whatsapp_phone / email de compra que preenchemos via setCustomFields)
+
+async function findByCustomField(fieldId, fieldValue, apiKey) {
+  try {
+    console.log(`🔎 findByCustomField field_id=${fieldId} value="${fieldValue}"`);
+    const response = await axios.get(
+      `${MANYCHAT_API_URL}/fb/subscriber/findByCustomField`,
+      {
+        headers: getHeaders(apiKey),
+        params: { field_id: fieldId, field_value: fieldValue },
+      }
+    );
+    const results = Array.isArray(response?.data?.data) ? response.data.data : [];
+    console.log(`🔎 findByCustomField resultado: ${results.length} encontrado(s)`);
+    if (results.length > 0 && results[0]?.id) {
+      return { id: results[0].id };
+    }
+    return null;
+  } catch (error) {
+    console.log('❌ findByCustomField erro:', JSON.stringify(error?.response?.data || { message: error.message }, null, 2));
+    return null;
+  }
+}
+
+async function findSubscriberByCustomFieldPhone(phone, apiKey) {
+  const digits = onlyDigits(phone);
+  if (!digits) return null;
+
+  const withoutDDI = digits.startsWith('55') ? digits.slice(2) : digits;
+  const raw        = withoutDDI; // ex: 37990819093
+
+  // Formatos possíveis salvos no campo: "37990819093", "37 9 9081 9093", com/sem DDI
+  const variants = new Set([
+    raw,
+    digits,
+    `55${raw}`,
+    `${raw.slice(0,2)} ${raw.slice(2,3)} ${raw.slice(3,7)} ${raw.slice(7)}`, // "37 9 9081 9093"
+  ]);
+
+  for (const variant of variants) {
+    const subscriber = await findByCustomField(PHONE_CUSTOM_FIELD_ID, variant, apiKey);
+    if (subscriber?.id) {
+      console.log(`✅ Subscriber encontrado por custom field phone_number: ${subscriber.id}`);
+      return subscriber;
+    }
+  }
+
+  return null;
+}
+
+async function findSubscriberByCustomFieldEmail(email, apiKey) {
+  if (!email) return null;
+  const subscriber = await findByCustomField(EMAIL_CUSTOM_FIELD_ID, email, apiKey);
+  if (subscriber?.id) {
+    console.log(`✅ Subscriber encontrado por custom field email: ${subscriber.id}`);
+  }
+  return subscriber;
 }
 
 async function getSubscriberInfo(subscriberId, apiKey) {
@@ -171,27 +227,16 @@ async function findSubscriberByNameAndPhone(name, phone, apiKey) {
         const subscriberId = item?.id;
         if (!subscriberId) continue;
 
-        // 🆕 LOG do item bruto retornado
-        console.log(`📋 Item retornado:`, JSON.stringify(item, null, 2));
-
         const info = await getSubscriberInfo(subscriberId, apiKey);
-
-        // 🆕 LOG do info completo
-        console.log(`📋 Info do subscriber ${subscriberId}:`, JSON.stringify({
-          phone: info?.phone,
-          whatsapp_phone: info?.whatsapp_phone,
-        }, null, 2));
 
         const possiblePhones = [
           item?.phone, item?.whatsapp_phone,
           info?.phone, info?.whatsapp_phone,
         ].filter(Boolean);
 
-        // 🆕 LOG da comparação
-        console.log(`🔍 Comparando telefone alvo "${phone}" (digits: ${onlyDigits(phone)}) com possíveis:`, possiblePhones);
+        console.log(`🔍 Comparando telefone alvo "${phone}" com possíveis:`, possiblePhones);
 
         const matched = possiblePhones.some(p => phoneMatches(p, phone));
-
         console.log(`🔍 Resultado do match: ${matched}`);
 
         if (matched) {
@@ -210,7 +255,7 @@ async function createSubscriber({ phone, name, email, apiKey }) {
   const digits = onlyDigits(phone);
   if (!digits) throw new Error('Telefone inválido para criar subscriber.');
 
-  const whatsappPhone    = digits.startsWith('55') ? digits : `55${digits}`;
+  const whatsappPhone           = digits.startsWith('55') ? digits : `55${digits}`;
   const { firstName, lastName } = splitName(name);
 
   const payload = {
@@ -249,11 +294,17 @@ async function createSubscriber({ phone, name, email, apiKey }) {
     }
 
     // Fallbacks de busca
+    const byCustomPhone = await findSubscriberByCustomFieldPhone(phone, apiKey);
+    if (byCustomPhone?.id) return byCustomPhone;
+
     const byPhone = await findSubscriberByPhone(phone, apiKey);
     if (byPhone?.id) return byPhone;
 
     const byNamePhone = await findSubscriberByNameAndPhone(name, phone, apiKey);
     if (byNamePhone?.id) return byNamePhone;
+
+    const byCustomEmail = await findSubscriberByCustomFieldEmail(email, apiKey);
+    if (byCustomEmail?.id) return byCustomEmail;
 
     const byEmail = await findSubscriberByEmail(email, apiKey);
     if (byEmail?.id) return byEmail;
@@ -275,10 +326,10 @@ async function updateSubscriber(subscriberId, { name, email, phone, apiKey }) {
   const digits = onlyDigits(phone);
 
   const payload = {
-    subscriber_id: Number(subscriberId),
-    first_name:    firstName || undefined,
-    last_name:     lastName  || undefined,
-    phone:         digits    || undefined,
+    subscriber_id:  Number(subscriberId),
+    first_name:     firstName || undefined,
+    last_name:      lastName  || undefined,
+    phone:          digits    || undefined,
     has_opt_in_sms: Boolean(digits),
     consent_phrase: 'Aceito receber mensagens.',
   };
@@ -312,7 +363,6 @@ async function addTagByName(subscriberId, tagName, apiKey) {
 
 async function setCustomFields(subscriberId, fields, apiKey) {
   try {
-    // fields = [{ field_name: 'email', field_value: '...' }, ...]
     for (const field of fields) {
       if (!field.field_value) continue;
       await axios.post(
@@ -330,6 +380,8 @@ async function setCustomFields(subscriberId, fields, apiKey) {
     console.warn('⚠️  setCustomFields erro:', JSON.stringify(error?.response?.data || { message: error.message }, null, 2));
   }
 }
+
+// ── Fluxo principal: garante subscriber + tag (usado pelo webhook da Hubla) ──
 
 async function ensureSubscriberAndAddTag({ name, email, phone, tagName, apiKey }) {
   let subscriber = null;
@@ -352,7 +404,7 @@ async function ensureSubscriberAndAddTag({ name, email, phone, tagName, apiKey }
 
   await addTagByName(subscriber.id, tagName, apiKey);
 
-  // Preenche campos personalizados
+  // Preenche campos personalizados (é aqui que phone_number e email ficam salvos)
   await setCustomFields(subscriber.id, [
     { field_name: 'email',        field_value: email },
     { field_name: 'phone_number', field_value: phone },
@@ -364,26 +416,23 @@ async function ensureSubscriberAndAddTag({ name, email, phone, tagName, apiKey }
   };
 }
 
-// ── Webhook ───────────────────────────────────────────────────────────────────
+// ── Webhook Hubla ─────────────────────────────────────────────────────────────
 
 app.post('/webhook/hubla', async (req, res) => {
   try {
     const body = req.body;
     console.log('📩 Webhook recebido:', JSON.stringify(body, null, 2));
 
-    // 1. Valida evento
     if (body.type !== 'invoice.payment_succeeded') {
       console.log('⏩ Evento ignorado:', body.type);
       return res.status(200).json({ ok: true, message: 'evento ignorado' });
     }
 
-    // 2. Valida status paid
     if (body.event?.invoice?.status !== 'paid') {
       console.log('⏩ Status não é paid:', body.event?.invoice?.status);
       return res.status(200).json({ ok: true, message: 'status ignorado' });
     }
 
-    // 3. Extrai dados do comprador
     const payer = body.event.invoice.payer || body.event.user || {};
     const name  = `${payer.firstName || ''} ${payer.lastName || ''}`.trim() || 'Lead';
     const email = payer.email || null;
@@ -396,7 +445,6 @@ app.post('/webhook/hubla', async (req, res) => {
       return res.status(200).json({ ok: false, message: 'email e phone ausentes' });
     }
 
-    // 4. Garante subscriber e adiciona tag
     const result = await ensureSubscriberAndAddTag({
       name,
       email,
@@ -416,19 +464,15 @@ app.post('/webhook/hubla', async (req, res) => {
 
 // ── Webhook Typeform ──────────────────────────────────────────────────────────
 
-const TYPEFORM_TAG_NAME = process.env.TYPEFORM_TAG_NAME || 'preencheu-type-codigo-passagem-barata';
-
 app.post('/webhook/typeform', async (req, res) => {
   try {
     const body = req.body;
     console.log('📩 Typeform recebido:', JSON.stringify(body, null, 2));
 
-    // 1. Extrai respostas do Typeform
-    const answers  = body?.form_response?.answers || [];
-    const hidden   = body?.form_response?.hidden  || {};
-    const fields   = body?.form_response?.definition?.fields || [];
+    const answers = body?.form_response?.answers || [];
+    const hidden  = body?.form_response?.hidden  || {};
+    const fields  = body?.form_response?.definition?.fields || [];
 
-    // 2. Mapeia campo → resposta
     let email = hidden?.email || null;
     let phone = hidden?.phone || null;
     let name  = hidden?.name  || null;
@@ -461,32 +505,44 @@ app.post('/webhook/typeform', async (req, res) => {
       return res.status(200).json({ ok: false, message: 'email e phone ausentes' });
     }
 
-    // 3. Busca subscriber no ManyChat
+    // ── Busca em cascata — prioriza os CUSTOM FIELDS, que é onde os dados reais estão salvos
     let subscriber = null;
 
-    console.log('➡️  Etapa 1: buscando por telefone...');
+    console.log('➡️  Etapa 1: buscando por custom field phone_number...');
     if (phone) {
+      subscriber = await findSubscriberByCustomFieldPhone(phone, process.env.MANYCHAT_API_KEY);
+    }
+    console.log('➡️  Resultado etapa 1:', subscriber?.id || 'não encontrado');
+
+    console.log('➡️  Etapa 2: buscando por custom field email...');
+    if (!subscriber && email) {
+      subscriber = await findSubscriberByCustomFieldEmail(email, process.env.MANYCHAT_API_KEY);
+    }
+    console.log('➡️  Resultado etapa 2:', subscriber?.id || 'não encontrado');
+
+    console.log('➡️  Etapa 3: buscando por telefone (campo sistema)...');
+    if (!subscriber && phone) {
       subscriber = await findSubscriberByPhone(phone, process.env.MANYCHAT_API_KEY);
     }
-    console.log('➡️  Resultado busca por telefone:', subscriber?.id || 'não encontrado');
+    console.log('➡️  Resultado etapa 3:', subscriber?.id || 'não encontrado');
 
-    console.log('➡️  Etapa 2: buscando por email...');
+    console.log('➡️  Etapa 4: buscando por email (campo sistema)...');
     if (!subscriber && email) {
       subscriber = await findSubscriberByEmail(email, process.env.MANYCHAT_API_KEY);
     }
-    console.log('➡️  Resultado busca por email:', subscriber?.id || 'não encontrado');
+    console.log('➡️  Resultado etapa 4:', subscriber?.id || 'não encontrado');
 
-    console.log('➡️  Etapa 3: buscando por nome + telefone...');
+    console.log('➡️  Etapa 5: buscando por nome + telefone...');
     if (!subscriber && name && phone) {
       subscriber = await findSubscriberByNameAndPhone(name, phone, process.env.MANYCHAT_API_KEY);
     }
-    console.log('➡️  Resultado busca por nome+telefone:', subscriber?.id || 'não encontrado');
+    console.log('➡️  Resultado etapa 5:', subscriber?.id || 'não encontrado');
 
     if (!subscriber?.id) {
       console.warn('⚠️  Subscriber não encontrado no ManyChat');
       return res.status(200).json({ ok: false, message: 'subscriber não encontrado no ManyChat', email, phone });
     }
-    // 4. Adiciona a tag
+
     await addTagByName(subscriber.id, TYPEFORM_TAG_NAME, process.env.MANYCHAT_API_KEY);
     console.log(`✅ Tag "${TYPEFORM_TAG_NAME}" adicionada para subscriber ${subscriber.id}`);
 
