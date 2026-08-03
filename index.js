@@ -101,18 +101,32 @@ async function findSubscriberBySystemField(params, apiKey) {
 
 async function findSubscriberByEmail(email, apiKey) {
   if (!email) return null;
-  return findSubscriberBySystemField({ email }, apiKey);
+  return findSubscriberBySystemField({ field_name: 'email', field_value: email }, apiKey);
 }
 
 async function findSubscriberByPhone(phone, apiKey) {
   const variants = normalizePhoneVariants(phone);
+
   for (const variant of variants) {
-    const subscriber = await findSubscriberBySystemField({ phone: variant }, apiKey);
+    // Tenta pelo campo "phone"
+    let subscriber = await findSubscriberBySystemField(
+      { field_name: 'phone', field_value: variant }, apiKey
+    );
     if (subscriber?.id) {
       console.log(`✅ Subscriber encontrado por phone: ${subscriber.id}`);
       return subscriber;
     }
+
+    // Tenta pelo campo "whatsapp_phone" (muitos contatos só têm esse preenchido)
+    subscriber = await findSubscriberBySystemField(
+      { field_name: 'whatsapp_phone', field_value: variant }, apiKey
+    );
+    if (subscriber?.id) {
+      console.log(`✅ Subscriber encontrado por whatsapp_phone: ${subscriber.id}`);
+      return subscriber;
+    }
   }
+
   return null;
 }
 
