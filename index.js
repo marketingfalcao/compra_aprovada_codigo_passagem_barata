@@ -378,6 +378,83 @@ app.post('/webhook/hubla', async (req, res) => {
   }
 });
 
+// ── Webhook Typeform ──────────────────────────────────────────────────────────
+
+const TYPEFORM_TAG_NAME = process.env.TYPEFORM_TAG_NAME || 'preencheu-type-codigo-passagem-barata';
+
+app.post('/webhook/typeform', async (req, res) => {
+  try {
+    const body = req.body;
+    console.log('📩 Typeform recebido:', JSON.stringify(body, null, 2));
+
+    // 1. Extrai respostas do Typeform
+    const answers  = body?.form_response?.answers || [];
+    const hidden   = body?.form_response?.hidden  || {};
+    const fields   = body?.form_response?.definition?.fields || [];
+
+    // 2. Mapeia campo → resposta
+    let email = hidden?.email || null;
+    let phone = hidden?.phone || null;
+    let name  = hidden?.name  || null;
+
+    for (const answer of answers) {
+      const fieldId = answer.field?.id;
+      const field   = fields.find(f => f.id === fieldId);
+      const type    = answer.type;
+      const value   = answer[type] || null;
+
+      if (!field || !value) continue;
+
+      const label = String(field.title || '').toLowerCase();
+
+      if (!email && (label.includes('email') || label.includes('e-mail'))) {
+        email = value;
+      }
+      if (!phone && (label.includes('telefone') || label.includes('phone') || label.includes('whatsapp') || label.includes('número') || label.includes('numero'))) {
+        phone = String(value);
+      }
+      if (!name && (label.includes('nome') || label.includes('name'))) {
+        name = String(value);
+      }
+    }
+
+    console.log(`📧 Email: ${email} | 📞 Telefone: ${phone} | 👤 Nome: ${name}`);
+
+    if (!email && !phone) {
+      console.warn('⚠️  Email e telefone ausentes no payload do Typeform');
+      return res.status(200).json({ ok: false, message: 'email e phone ausentes' });
+    }
+
+    // 3. Busca subscriber no ManyChat
+    let subscriber = null;
+
+    if (phone) {
+      subscriber = await findSubscriberByPhone(phone, process.env.MANYCHAT_API_KEY);
+    }
+    if (!subscriber && email) {
+      subscriber = await findSubscriberByEmail(email, process.env.MANYCHAT_API_KEY);
+    }
+    if (!subscriber && name && phone) {
+      subscriber = await findSubscriberByNameAndPhone(name, phone, process.env.MANYCHAT_API_KEY);
+    }
+
+    if (!subscriber?.id) {
+      console.warn('⚠️  Subscriber não encontrado no ManyChat');
+      return res.status(200).json({ ok: false, message: 'subscriber não encontrado no ManyChat', email, phone });
+    }
+
+    // 4. Adiciona a tag
+    await addTagByName(subscriber.id, TYPEFORM_TAG_NAME, process.env.MANYCHAT_API_KEY);
+    console.log(`✅ Tag "${TYPEFORM_TAG_NAME}" adicionada para subscriber ${subscriber.id}`);
+
+    return res.status(200).json({ ok: true, subscriberId: subscriber.id, tagName: TYPEFORM_TAG_NAME });
+
+  } catch (err) {
+    console.error('❌ Erro Typeform:', err?.response?.data || err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/', (_req, res) => res.json({ status: 'ok' }));
 
 app.listen(process.env.PORT || 3000, () => {
