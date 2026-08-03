@@ -9,27 +9,67 @@ const MANYCHAT_API = 'https://api.manychat.com';
 const MC_TOKEN     = process.env.MANYCHAT_API_KEY;
 const TAG_ID       = Number(process.env.MANYCHAT_TAG_ID);
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-async function findSubscriberByPhone(phone) {
-  const response = await axios.get(
-    `${MANYCHAT_API}/fb/subscriber/findBySystemField`,
-    {
-      params: { field_name: 'phone', field_value: phone },
-      headers: { Authorization: `Bearer ${MC_TOKEN}` },
-    }
-  );
-  const data = response.data;
-  if (data.status === 'success' && data.data && data.data.id) {
-    return data.data.id;
+// ── Normaliza telefone para E.164 ─────────────────────────────────────────────
+function normalizePhone(raw) {
+  if (!raw) return null;
+  let digits = String(raw).replace(/\D/g, '');
+  if (digits.length === 10 || digits.length === 11) {
+    digits = '55' + digits;
   }
-  return null;
+  return '+' + digits; // ex: +5531986294903
 }
 
-async function createSubscriber(phone, firstName, lastName) {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+async function findSubscriberByEmail(email) {
+  try {
+    const response = await axios.get(
+      `${MANYCHAT_API}/fb/subscriber/findBySystemField`,
+      {
+        params: { field_name: 'email', field_value: email },
+        headers: { Authorization: `Bearer ${MC_TOKEN}` },
+      }
+    );
+    const data = response.data;
+    if (data.status === 'success' && data.data && data.data.id) {
+      return data.data.id;
+    }
+    return null;
+  } catch (err) {
+    console.warn('⚠️  findByEmail falhou:', err?.response?.data || err.message);
+    return null;
+  }
+}
+
+async function findSubscriberByPhone(phone) {
+  try {
+    const response = await axios.get(
+      `${MANYCHAT_API}/fb/subscriber/findBySystemField`,
+      {
+        params: { field_name: 'phone', field_value: phone },
+        headers: { Authorization: `Bearer ${MC_TOKEN}` },
+      }
+    );
+    const data = response.data;
+    if (data.status === 'success' && data.data && data.data.id) {
+      return data.data.id;
+    }
+    return null;
+  } catch (err) {
+    console.warn('⚠️  findByPhone falhou:', err?.response?.data || err.message);
+    return null;
+  }
+}
+
+async function createSubscriber(email, phone, firstName, lastName) {
   const response = await axios.post(
     `${MANYCHAT_API}/fb/subscriber/createSubscriber`,
-    { phone, first_name: firstName, last_name: lastName },
+    {
+      email,
+      phone,
+      first_name: firstName,
+      last_name:  lastName,
+    },
     { headers: { Authorization: `Bearer ${MC_TOKEN}` } }
   );
   return response.data?.data?.id || null;
@@ -64,23 +104,35 @@ app.post('/webhook/hubla', async (req, res) => {
 
     // 3. Extrai dados do comprador
     const payer     = body.event.invoice.payer || body.event.user || {};
-    const phone     = payer.phone;
+    const email     = payer.email;
+    const phone     = normalizePhone(payer.phone);
     const firstName = payer.firstName || 'Lead';
     const lastName  = payer.lastName  || '';
 
-    if (!phone) {
-      console.warn('⚠️  Telefone não encontrado no payload');
-      return res.status(200).json({ ok: false, message: 'phone ausente' });
+    console.log(`📧 Email: ${email} | 📞 Telefone: ${phone} | Nome: ${firstName} ${lastName}`);
+
+    if (!email && !phone) {
+      console.warn('⚠️  Email e telefone ausentes no payload');
+      return res.status(200).json({ ok: false, message: 'email e phone ausentes' });
     }
 
-    console.log(`📞 Telefone: ${phone} | Nome: ${firstName} ${lastName}`);
+    // 4. Busca subscriber — primeiro por email, depois por telefone
+    let subscriberId = null;
 
-    // 4. Busca ou cria subscriber no ManyChat
-    let subscriberId = await findSubscriberByPhone(phone);
+    if (email) {
+      console.log('🔍 Buscando subscriber por email...');
+      subscriberId = await findSubscriberByEmail(email);
+    }
 
+    if (!subscriberId && phone) {
+      console.log('🔍 Buscando subscriber por telefone...');
+      subscriberId = await findSubscriberByPhone(phone);
+    }
+
+    // 5. Se não encontrou, cria
     if (!subscriberId) {
       console.log('➕ Subscriber não encontrado, criando...');
-      subscriberId = await createSubscriber(phone, firstName, lastName);
+      subscriberId = await createSubscriber(email, phone, firstName, lastName);
     }
 
     if (!subscriberId) {
@@ -88,7 +140,9 @@ app.post('/webhook/hubla', async (req, res) => {
       return res.status(500).json({ ok: false, message: 'subscriber_id nulo' });
     }
 
-    // 5. Adiciona a tag
+    console.log(`👤 Subscriber ID: ${subscriberId}`);
+
+    // 6. Adiciona a tag de compra aprovada
     await addTagToSubscriber(subscriberId);
     console.log(`✅ Tag ${TAG_ID} adicionada para subscriber ${subscriberId}`);
 
