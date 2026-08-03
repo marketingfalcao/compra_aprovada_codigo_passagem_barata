@@ -152,12 +152,30 @@ async function findSubscriberByNameAndPhone(name, phone, apiKey) {
       for (const item of results) {
         const subscriberId = item?.id;
         if (!subscriberId) continue;
+
+        // 🆕 LOG do item bruto retornado
+        console.log(`📋 Item retornado:`, JSON.stringify(item, null, 2));
+
         const info = await getSubscriberInfo(subscriberId, apiKey);
+
+        // 🆕 LOG do info completo
+        console.log(`📋 Info do subscriber ${subscriberId}:`, JSON.stringify({
+          phone: info?.phone,
+          whatsapp_phone: info?.whatsapp_phone,
+        }, null, 2));
+
         const possiblePhones = [
           item?.phone, item?.whatsapp_phone,
           info?.phone, info?.whatsapp_phone,
         ].filter(Boolean);
+
+        // 🆕 LOG da comparação
+        console.log(`🔍 Comparando telefone alvo "${phone}" (digits: ${onlyDigits(phone)}) com possíveis:`, possiblePhones);
+
         const matched = possiblePhones.some(p => phoneMatches(p, phone));
+
+        console.log(`🔍 Resultado do match: ${matched}`);
+
         if (matched) {
           console.log(`✅ Subscriber encontrado por nome + telefone: ${subscriberId}`);
           return { id: subscriberId };
