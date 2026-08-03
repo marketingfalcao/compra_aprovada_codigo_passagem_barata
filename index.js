@@ -81,11 +81,15 @@ function extractExistingWhatsappId(apiError) {
 
 async function findSubscriberBySystemField(params, apiKey) {
   try {
+    console.log(`🔍 Chamando findBySystemField:`, JSON.stringify(params));
     const response = await axios.get(
       `${MANYCHAT_API_URL}/fb/subscriber/findBySystemField`,
       { headers: getHeaders(apiKey), params }
     );
-    return extractSubscriber(response?.data);
+    console.log(`🔍 Resposta bruta findBySystemField:`, JSON.stringify(response.data));
+    const subscriber = extractSubscriber(response?.data);
+    console.log(`🔍 Subscriber extraído:`, subscriber ? subscriber.id : 'nenhum');
+    return subscriber;
   } catch (error) {
     console.log('❌ findBySystemField erro:', JSON.stringify({
       params,
@@ -446,21 +450,28 @@ app.post('/webhook/typeform', async (req, res) => {
     // 3. Busca subscriber no ManyChat
     let subscriber = null;
 
+    console.log('➡️  Etapa 1: buscando por telefone...');
     if (phone) {
       subscriber = await findSubscriberByPhone(phone, process.env.MANYCHAT_API_KEY);
     }
+    console.log('➡️  Resultado busca por telefone:', subscriber?.id || 'não encontrado');
+
+    console.log('➡️  Etapa 2: buscando por email...');
     if (!subscriber && email) {
       subscriber = await findSubscriberByEmail(email, process.env.MANYCHAT_API_KEY);
     }
+    console.log('➡️  Resultado busca por email:', subscriber?.id || 'não encontrado');
+
+    console.log('➡️  Etapa 3: buscando por nome + telefone...');
     if (!subscriber && name && phone) {
       subscriber = await findSubscriberByNameAndPhone(name, phone, process.env.MANYCHAT_API_KEY);
     }
+    console.log('➡️  Resultado busca por nome+telefone:', subscriber?.id || 'não encontrado');
 
     if (!subscriber?.id) {
       console.warn('⚠️  Subscriber não encontrado no ManyChat');
       return res.status(200).json({ ok: false, message: 'subscriber não encontrado no ManyChat', email, phone });
     }
-
     // 4. Adiciona a tag
     await addTagByName(subscriber.id, TYPEFORM_TAG_NAME, process.env.MANYCHAT_API_KEY);
     console.log(`✅ Tag "${TYPEFORM_TAG_NAME}" adicionada para subscriber ${subscriber.id}`);
