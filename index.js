@@ -274,6 +274,27 @@ async function addTagByName(subscriberId, tagName, apiKey) {
   return response?.data || null;
 }
 
+async function setCustomFields(subscriberId, fields, apiKey) {
+  try {
+    // fields = [{ field_name: 'email', field_value: '...' }, ...]
+    for (const field of fields) {
+      if (!field.field_value) continue;
+      await axios.post(
+        `${MANYCHAT_API_URL}/fb/subscriber/setCustomFieldByName`,
+        {
+          subscriber_id: Number(subscriberId),
+          field_name:    field.field_name,
+          field_value:   field.field_value,
+        },
+        { headers: getHeaders(apiKey) }
+      );
+      console.log(`📝 Campo "${field.field_name}" definido: ${field.field_value}`);
+    }
+  } catch (error) {
+    console.warn('⚠️  setCustomFields erro:', JSON.stringify(error?.response?.data || { message: error.message }, null, 2));
+  }
+}
+
 async function ensureSubscriberAndAddTag({ name, email, phone, tagName, apiKey }) {
   let subscriber = null;
 
@@ -294,6 +315,12 @@ async function ensureSubscriberAndAddTag({ name, email, phone, tagName, apiKey }
   }
 
   await addTagByName(subscriber.id, tagName, apiKey);
+
+  // Preenche campos personalizados
+  await setCustomFields(subscriber.id, [
+    { field_name: 'email',        field_value: email },
+    { field_name: 'phone_number', field_value: phone },
+  ], apiKey);
 
   return {
     subscriberId: subscriber.id,
