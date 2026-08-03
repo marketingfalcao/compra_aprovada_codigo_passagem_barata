@@ -5,78 +5,300 @@ const axios   = require('axios');
 const app = express();
 app.use(express.json());
 
-const MANYCHAT_API = 'https://api.manychat.com';
-const MC_TOKEN     = process.env.MANYCHAT_API_KEY;
-const TAG_ID       = Number(process.env.MANYCHAT_TAG_ID);
+const MANYCHAT_API_URL = 'https://api.manychat.com';
+const TAG_NAME         = process.env.MANYCHAT_TAG_NAME || 'compra_aprovada_codigo_passagem_barata';
 
-// ── Normaliza telefone para E.164 ─────────────────────────────────────────────
-function normalizePhone(raw) {
-  if (!raw) return null;
-  let digits = String(raw).replace(/\D/g, '');
-  if (digits.length === 10 || digits.length === 11) {
-    digits = '55' + digits;
-  }
-  return '+' + digits;
+// ── Utils ─────────────────────────────────────────────────────────────────────
+
+function getHeaders(apiKey = process.env.MANYCHAT_API_KEY) {
+  if (!apiKey) throw new Error('API Key do ManyChat não informada.');
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+function onlyDigits(value = '') {
+  return String(value || '').replace(/\D/g, '');
+}
 
-async function findSubscriberByPhone(phone) {
+function normalizePhoneVariants(phone = '') {
+  const digits = onlyDigits(phone);
+  if (!digits) return [];
+
+  const variants = new Set();
+  if (digits.startsWith('55')) {
+    variants.add(digits);
+    variants.add(`+${digits}`);
+    variants.add(digits.slice(2));
+    variants.add(`+${digits.slice(2)}`);
+  } else {
+    variants.add(digits);
+    variants.add(`+${digits}`);
+    variants.add(`55${digits}`);
+    variants.add(`+55${digits}`);
+  }
+  return Array.from(variants).filter(Boolean);
+}
+
+function splitName(fullName = '') {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  return {
+    firstName: parts[0] || '',
+    lastName:  parts.slice(1).join(' '),
+  };
+}
+
+function extractSubscriber(payload) {
+  if (!payload) return null;
+  if (payload?.id) return payload;
+  if (payload?.data?.id) return payload.data;
+  if (Array.isArray(payload?.data) && payload.data[0]?.id) return payload.data[0];
+  if (Array.isArray(payload) && payload[0]?.id) return payload[0];
+  return null;
+}
+
+function phoneMatches(possiblePhone, targetPhone) {
+  const p      = onlyDigits(possiblePhone);
+  const target = onlyDigits(targetPhone);
+  if (!p || !target) return false;
+  return (
+    p === target ||
+    p === `55${target}` ||
+    target === `55${p}` ||
+    p.endsWith(target) ||
+    target.endsWith(p)
+  );
+}
+
+function extractExistingWhatsappId(apiError) {
+  const text  = JSON.stringify(apiError || '');
+  const match = text.match(/This WhatsApp ID already exists:\s*(\d+)/i);
+  return match?.[1] || null;
+}
+
+// ── ManyChat API ──────────────────────────────────────────────────────────────
+
+async function findSubscriberBySystemField(params, apiKey) {
   try {
     const response = await axios.get(
-      `${MANYCHAT_API}/fb/subscriber/findBySystemField`,
-      {
-        params: { field_name: 'phone', field_value: phone },
-        headers: { Authorization: `Bearer ${MC_TOKEN}` },
-      }
+      `${MANYCHAT_API_URL}/fb/subscriber/findBySystemField`,
+      { headers: getHeaders(apiKey), params }
     );
-    const data = response.data;
-    if (data.status === 'success' && data.data && data.data.id) {
-      return data.data.id;
+    return extractSubscriber(response?.data);
+  } catch (error) {
+    console.log('❌ findBySystemField erro:', JSON.stringify({
+      params,
+      error: error?.response?.data || { message: error.message },
+    }, null, 2));
+    return null;
+  }
+}
+
+async function findSubscriberByEmail(email, apiKey) {
+  if (!email) return null;
+  return findSubscriberBySystemField({ email }, apiKey);
+}
+
+async function findSubscriberByPhone(phone, apiKey) {
+  const variants = normalizePhoneVariants(phone);
+  for (const variant of variants) {
+    const subscriber = await findSubscriberBySystemField({ phone: variant }, apiKey);
+    if (subscriber?.id) {
+      console.log(`✅ Subscriber encontrado por phone: ${subscriber.id}`);
+      return subscriber;
     }
-    return null;
-  } catch (err) {
-    // Log completo do erro
-    console.warn('⚠️  findByPhone falhou:', JSON.stringify(err?.response?.data, null, 2));
-    return null;
   }
+  return null;
 }
 
-async function createSubscriber(email, phone, firstName, lastName) {
+async function getSubscriberInfo(subscriberId, apiKey) {
+  if (!subscriberId) return null;
   try {
-    const payload = {
-      first_name:       firstName,
-      last_name:        lastName,
-      phone:            phone,
-      email:            email,
-      has_opt_in_sms:   true,
-      has_opt_in_email: true,
-      consent_phrase:   'Compra aprovada na Hubla',
-    };
-
-    // Loga o payload exato que está enviando
-    console.log('📤 Payload createSubscriber:', JSON.stringify(payload, null, 2));
-
-    const response = await axios.post(
-      `${MANYCHAT_API}/fb/subscriber/createSubscriber`,
-      payload,
-      { headers: { Authorization: `Bearer ${MC_TOKEN}` } }
+    const response = await axios.get(
+      `${MANYCHAT_API_URL}/fb/subscriber/getInfo`,
+      { headers: getHeaders(apiKey), params: { subscriber_id: subscriberId } }
     );
-    console.log('✅ Subscriber criado:', response.data?.data?.id);
-    return response.data?.data?.id || null;
-  } catch (err) {
-    // Log completo do erro
-    console.error('❌ createSubscriber falhou:', JSON.stringify(err?.response?.data, null, 2));
+    return response?.data?.data || response?.data || null;
+  } catch (error) {
+    console.log('❌ getInfo erro:', JSON.stringify(error?.response?.data || { message: error.message }, null, 2));
     return null;
   }
 }
 
-async function addTagToSubscriber(subscriber_id) {
-  await axios.post(
-    `${MANYCHAT_API}/fb/subscriber/addTag`,
-    { subscriber_id, tag_id: TAG_ID },
-    { headers: { Authorization: `Bearer ${MC_TOKEN}` } }
+async function findSubscriberByNameAndPhone(name, phone, apiKey) {
+  if (!phone) return null;
+  const digits    = onlyDigits(phone);
+  const nameParts = String(name || '').trim().split(/\s+/).filter(Boolean);
+
+  const searchTerms = Array.from(new Set([
+    name,
+    nameParts[0],
+    nameParts.slice(0, 2).join(' '),
+    digits,
+    digits.startsWith('55') ? digits.slice(2) : `55${digits}`,
+  ].filter(Boolean)));
+
+  for (const searchName of searchTerms) {
+    try {
+      console.log(`🔎 Buscando subscriber por nome: ${searchName}`);
+      const response = await axios.get(
+        `${MANYCHAT_API_URL}/fb/subscriber/findByName`,
+        { headers: getHeaders(apiKey), params: { name: searchName } }
+      );
+      const results = Array.isArray(response?.data?.data) ? response.data.data : [];
+      console.log(`🔎 findByName "${searchName}" encontrou ${results.length} resultado(s).`);
+
+      for (const item of results) {
+        const subscriberId = item?.id;
+        if (!subscriberId) continue;
+        const info = await getSubscriberInfo(subscriberId, apiKey);
+        const possiblePhones = [
+          item?.phone, item?.whatsapp_phone,
+          info?.phone, info?.whatsapp_phone,
+        ].filter(Boolean);
+        const matched = possiblePhones.some(p => phoneMatches(p, phone));
+        if (matched) {
+          console.log(`✅ Subscriber encontrado por nome + telefone: ${subscriberId}`);
+          return { id: subscriberId };
+        }
+      }
+    } catch (error) {
+      console.log(`❌ findByName erro (${searchName}):`, JSON.stringify(error?.response?.data || { message: error.message }, null, 2));
+    }
+  }
+  return null;
+}
+
+async function createSubscriber({ phone, name, email, apiKey }) {
+  const digits = onlyDigits(phone);
+  if (!digits) throw new Error('Telefone inválido para criar subscriber.');
+
+  const whatsappPhone    = digits.startsWith('55') ? digits : `55${digits}`;
+  const { firstName, lastName } = splitName(name);
+
+  const payload = {
+    first_name:     firstName,
+    last_name:      lastName,
+    whatsapp_phone: whatsappPhone,
+    has_opt_in_sms: true,
+    consent_phrase: 'Aceito receber mensagens.',
+  };
+
+  if (email) {
+    payload.email            = email;
+    payload.has_opt_in_email = true;
+  }
+
+  try {
+    const response   = await axios.post(
+      `${MANYCHAT_API_URL}/fb/subscriber/createSubscriber`,
+      payload,
+      { headers: getHeaders(apiKey) }
+    );
+    const subscriber = extractSubscriber(response?.data);
+    if (subscriber?.id) return subscriber;
+    throw new Error('ManyChat criou subscriber sem retornar id.');
+  } catch (error) {
+    const apiError = error?.response?.data || { message: error.message };
+    console.log('❌ createSubscriber erro:', JSON.stringify(apiError, null, 2));
+
+    // Tenta recuperar se WhatsApp já existe
+    const existingWaId = extractExistingWhatsappId(apiError);
+    if (existingWaId) {
+      console.log(`🔎 WhatsApp já existe: ${existingWaId}`);
+      const s = await findSubscriberByPhone(existingWaId, apiKey)
+             || await findSubscriberByNameAndPhone(name, existingWaId, apiKey);
+      if (s?.id) return s;
+    }
+
+    // Fallbacks de busca
+    const byPhone = await findSubscriberByPhone(phone, apiKey);
+    if (byPhone?.id) return byPhone;
+
+    const byNamePhone = await findSubscriberByNameAndPhone(name, phone, apiKey);
+    if (byNamePhone?.id) return byNamePhone;
+
+    const byEmail = await findSubscriberByEmail(email, apiKey);
+    if (byEmail?.id) return byEmail;
+
+    // Tenta sem email se der erro de permissão
+    const errorText = JSON.stringify(apiError).toLowerCase();
+    if (email && errorText.includes('permission denied to import email')) {
+      console.log('⚠️  Tentando criar subscriber sem email...');
+      return createSubscriber({ phone, name, email: null, apiKey });
+    }
+
+    throw new Error(`Erro no createSubscriber: ${JSON.stringify(apiError)}`);
+  }
+}
+
+async function updateSubscriber(subscriberId, { name, email, phone, apiKey }) {
+  if (!subscriberId) return null;
+  const { firstName, lastName } = splitName(name);
+  const digits = onlyDigits(phone);
+
+  const payload = {
+    subscriber_id: Number(subscriberId),
+    first_name:    firstName || undefined,
+    last_name:     lastName  || undefined,
+    phone:         digits    || undefined,
+    has_opt_in_sms: Boolean(digits),
+    consent_phrase: 'Aceito receber mensagens.',
+  };
+
+  if (email) {
+    payload.email            = email;
+    payload.has_opt_in_email = true;
+  }
+
+  try {
+    const response = await axios.post(
+      `${MANYCHAT_API_URL}/fb/subscriber/updateSubscriber`,
+      payload,
+      { headers: getHeaders(apiKey) }
+    );
+    return response?.data || null;
+  } catch (error) {
+    console.log('❌ updateSubscriber erro:', JSON.stringify(error?.response?.data || { message: error.message }, null, 2));
+    return null;
+  }
+}
+
+async function addTagByName(subscriberId, tagName, apiKey) {
+  const response = await axios.post(
+    `${MANYCHAT_API_URL}/fb/subscriber/addTagByName`,
+    { subscriber_id: Number(subscriberId), tag_name: tagName },
+    { headers: getHeaders(apiKey) }
   );
+  return response?.data || null;
+}
+
+async function ensureSubscriberAndAddTag({ name, email, phone, tagName, apiKey }) {
+  let subscriber = null;
+
+  if (phone) {
+    subscriber = await findSubscriberByPhone(phone, apiKey);
+  }
+  if (!subscriber && email) {
+    subscriber = await findSubscriberByEmail(email, apiKey);
+  }
+  if (!subscriber) {
+    subscriber = await createSubscriber({ phone, name, email, apiKey });
+  } else {
+    await updateSubscriber(subscriber.id, { name, email, phone, apiKey });
+  }
+
+  if (!subscriber?.id) {
+    throw new Error(`Não foi possível localizar ou criar subscriber. phone=${phone} email=${email}`);
+  }
+
+  await addTagByName(subscriber.id, tagName, apiKey);
+
+  return {
+    subscriberId: subscriber.id,
+    name, email, phone, tagName,
+  };
 }
 
 // ── Webhook ───────────────────────────────────────────────────────────────────
@@ -99,48 +321,32 @@ app.post('/webhook/hubla', async (req, res) => {
     }
 
     // 3. Extrai dados do comprador
-    const payer     = body.event.invoice.payer || body.event.user || {};
-    const email     = payer.email || null;
-    const phone     = normalizePhone(payer.phone);
-    const firstName = payer.firstName || 'Lead';
-    const lastName  = payer.lastName  || '';
+    const payer = body.event.invoice.payer || body.event.user || {};
+    const name  = `${payer.firstName || ''} ${payer.lastName || ''}`.trim() || 'Lead';
+    const email = payer.email || null;
+    const phone = payer.phone || null;
 
-    console.log(`📧 Email: ${email} | 📞 Telefone: ${phone} | Nome: ${firstName} ${lastName}`);
+    console.log(`👤 Nome: ${name} | 📧 Email: ${email} | 📞 Telefone: ${phone}`);
 
     if (!phone && !email) {
-      console.warn('⚠️  Email e telefone ausentes no payload');
+      console.warn('⚠️  Email e telefone ausentes');
       return res.status(200).json({ ok: false, message: 'email e phone ausentes' });
     }
 
-    // 4. Busca subscriber por telefone
-    let subscriberId = null;
+    // 4. Garante subscriber e adiciona tag
+    const result = await ensureSubscriberAndAddTag({
+      name,
+      email,
+      phone,
+      tagName: TAG_NAME,
+      apiKey:  process.env.MANYCHAT_API_KEY,
+    });
 
-    if (phone) {
-      console.log('🔍 Buscando subscriber por telefone...');
-      subscriberId = await findSubscriberByPhone(phone);
-    }
-
-    // 5. Se não encontrou, cria
-    if (!subscriberId) {
-      console.log('➕ Subscriber não encontrado, criando...');
-      subscriberId = await createSubscriber(email, phone, firstName, lastName);
-    }
-
-    if (!subscriberId) {
-      console.error('❌ Não foi possível obter subscriber_id');
-      return res.status(500).json({ ok: false, message: 'subscriber_id nulo' });
-    }
-
-    console.log(`👤 Subscriber ID: ${subscriberId}`);
-
-    // 6. Adiciona a tag de compra aprovada
-    await addTagToSubscriber(subscriberId);
-    console.log(`✅ Tag ${TAG_ID} adicionada para subscriber ${subscriberId}`);
-
-    return res.status(200).json({ ok: true, subscriber_id: subscriberId });
+    console.log(`✅ Tag "${TAG_NAME}" adicionada para subscriber ${result.subscriberId}`);
+    return res.status(200).json({ ok: true, ...result });
 
   } catch (err) {
-    console.error('❌ Erro:', err?.response?.data || err.message);
+    console.error('❌ Erro geral:', err?.response?.data || err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
