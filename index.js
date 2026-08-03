@@ -36,30 +36,37 @@ async function findSubscriberByPhone(phone) {
     }
     return null;
   } catch (err) {
-    console.warn('⚠️  findByPhone falhou:', err?.response?.data || err.message);
+    // Log completo do erro
+    console.warn('⚠️  findByPhone falhou:', JSON.stringify(err?.response?.data, null, 2));
     return null;
   }
 }
 
 async function createSubscriber(email, phone, firstName, lastName) {
   try {
+    const payload = {
+      first_name:       firstName,
+      last_name:        lastName,
+      phone:            phone,
+      email:            email,
+      has_opt_in_sms:   true,
+      has_opt_in_email: true,
+      consent_phrase:   'Compra aprovada na Hubla',
+    };
+
+    // Loga o payload exato que está enviando
+    console.log('📤 Payload createSubscriber:', JSON.stringify(payload, null, 2));
+
     const response = await axios.post(
       `${MANYCHAT_API}/fb/subscriber/createSubscriber`,
-      {
-        first_name:       firstName,
-        last_name:        lastName,
-        phone:            phone,
-        email:            email,
-        has_opt_in_sms:   true,
-        has_opt_in_email: true,
-        consent_phrase:   'Compra aprovada na Hubla',
-      },
+      payload,
       { headers: { Authorization: `Bearer ${MC_TOKEN}` } }
     );
     console.log('✅ Subscriber criado:', response.data?.data?.id);
     return response.data?.data?.id || null;
   } catch (err) {
-    console.error('❌ createSubscriber falhou:', err?.response?.data || err.message);
+    // Log completo do erro
+    console.error('❌ createSubscriber falhou:', JSON.stringify(err?.response?.data, null, 2));
     return null;
   }
 }
