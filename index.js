@@ -16,30 +16,10 @@ function normalizePhone(raw) {
   if (digits.length === 10 || digits.length === 11) {
     digits = '55' + digits;
   }
-  return '+' + digits; // ex: +5531986294903
+  return '+' + digits;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-async function findSubscriberByEmail(email) {
-  try {
-    const response = await axios.get(
-      `${MANYCHAT_API}/fb/subscriber/findBySystemField`,
-      {
-        params: { field_name: 'email', field_value: email },
-        headers: { Authorization: `Bearer ${MC_TOKEN}` },
-      }
-    );
-    const data = response.data;
-    if (data.status === 'success' && data.data && data.data.id) {
-      return data.data.id;
-    }
-    return null;
-  } catch (err) {
-    console.warn('⚠️  findByEmail falhou:', err?.response?.data || err.message);
-    return null;
-  }
-}
 
 async function findSubscriberByPhone(phone) {
   try {
@@ -62,17 +42,26 @@ async function findSubscriberByPhone(phone) {
 }
 
 async function createSubscriber(email, phone, firstName, lastName) {
-  const response = await axios.post(
-    `${MANYCHAT_API}/fb/subscriber/createSubscriber`,
-    {
-      email,
-      phone,
-      first_name: firstName,
-      last_name:  lastName,
-    },
-    { headers: { Authorization: `Bearer ${MC_TOKEN}` } }
-  );
-  return response.data?.data?.id || null;
+  try {
+    const response = await axios.post(
+      `${MANYCHAT_API}/fb/subscriber/createSubscriber`,
+      {
+        first_name:       firstName,
+        last_name:        lastName,
+        phone:            phone,
+        email:            email,
+        has_opt_in_sms:   true,
+        has_opt_in_email: true,
+        consent_phrase:   'Compra aprovada na Hubla',
+      },
+      { headers: { Authorization: `Bearer ${MC_TOKEN}` } }
+    );
+    console.log('✅ Subscriber criado:', response.data?.data?.id);
+    return response.data?.data?.id || null;
+  } catch (err) {
+    console.error('❌ createSubscriber falhou:', err?.response?.data || err.message);
+    return null;
+  }
 }
 
 async function addTagToSubscriber(subscriber_id) {
@@ -104,27 +93,22 @@ app.post('/webhook/hubla', async (req, res) => {
 
     // 3. Extrai dados do comprador
     const payer     = body.event.invoice.payer || body.event.user || {};
-    const email     = payer.email;
+    const email     = payer.email || null;
     const phone     = normalizePhone(payer.phone);
     const firstName = payer.firstName || 'Lead';
     const lastName  = payer.lastName  || '';
 
     console.log(`📧 Email: ${email} | 📞 Telefone: ${phone} | Nome: ${firstName} ${lastName}`);
 
-    if (!email && !phone) {
+    if (!phone && !email) {
       console.warn('⚠️  Email e telefone ausentes no payload');
       return res.status(200).json({ ok: false, message: 'email e phone ausentes' });
     }
 
-    // 4. Busca subscriber — primeiro por email, depois por telefone
+    // 4. Busca subscriber por telefone
     let subscriberId = null;
 
-    if (email) {
-      console.log('🔍 Buscando subscriber por email...');
-      subscriberId = await findSubscriberByEmail(email);
-    }
-
-    if (!subscriberId && phone) {
+    if (phone) {
       console.log('🔍 Buscando subscriber por telefone...');
       subscriberId = await findSubscriberByPhone(phone);
     }
